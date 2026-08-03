@@ -240,10 +240,10 @@ export default function App() {
 
           {markers.length < 2 ? (
             <p className="hint">Pick at least two points on the map to start a trip</p>
-          ) : isLoadingRoute ? (
-            <p className="hint">Finding a route along the streets…</p>
           ) : routeError ? (
             <p className="error">{routeError}</p>
+          ) : isLoadingRoute || !route ? (
+            <p className="hint">Finding a route along the streets…</p>
           ) : (
             <>
               <p className="route-info">
