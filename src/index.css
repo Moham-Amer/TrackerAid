@@ -100,6 +100,14 @@ body {
 }
 .marker-del:hover { background: #fee2e2; color: var(--red); border-color: #fecaca; }
 
+.error { font-size: 0.8rem; color: var(--red); line-height: 1.5; }
+.route-info {
+  font-size: 0.85rem;
+  color: var(--navy);
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
 /* ---------- progress ---------- */
 .progress {
   height: 6px;

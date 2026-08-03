@@ -27,29 +27,31 @@ const VEHICLE_ICON = new L.DivIcon({
 })
 
 const DAMASCUS = [33.5138, 36.2765]
-const STEPS_PER_LEG = 60 // How many positions to generate between two points
 const TICK_MS = 60
+const OSRM_URL = 'https://router.project-osrm.org/route/v1/driving'
 
-// Builds the positions the vehicle passes through by interpolating between the points
-function buildPath(points) {
-  if (points.length < 2) return []
+// Asks the OSRM routing service for a real driving route that follows the streets
+async function fetchRoute(points) {
+  const coords = points.map((p) => `${p.lng},${p.lat}`).join(';')
+  const res = await fetch(`${OSRM_URL}/${coords}?overview=full&geometries=geojson`)
 
-  const path = []
-  for (let i = 0; i < points.length - 1; i++) {
-    const from = points[i]
-    const to = points[i + 1]
+  if (!res.ok) throw new Error('Routing service is not responding')
 
-    for (let step = 0; step < STEPS_PER_LEG; step++) {
-      const t = step / STEPS_PER_LEG
-      path.push([from.lat + (to.lat - from.lat) * t, from.lng + (to.lng - from.lng) * t])
-    }
+  const data = await res.json()
+  if (data.code !== 'Ok' || !data.routes?.length) throw new Error('No driving route between these points')
+
+  const route = data.routes[0]
+  return {
+    // OSRM returns [lng, lat] but Leaflet expects [lat, lng]
+    path: route.geometry.coordinates.map(([lng, lat]) => [lat, lng]),
+    distance: route.distance, // metres
+    duration: route.duration, // seconds
   }
-  // Make sure the vehicle lands exactly on the final point
-  const last = points[points.length - 1]
-  path.push([last.lat, last.lng])
-
-  return path
 }
+
+// Turns metres and seconds into something readable
+const formatKm = (m) => `${(m / 1000).toFixed(1)} km`
+const formatMins = (s) => `${Math.max(1, Math.round(s / 60))} min`
 
 // Listens for map clicks and passes the coordinates up
 function ClickHandler({ onAdd }) {
@@ -79,9 +81,45 @@ export default function App() {
   const [pathIndex, setPathIndex] = useState(0)
   const intervalRef = useRef(null)
 
-  const path = useMemo(() => buildPath(markers), [markers])
-  const canTrack = markers.length >= 2
+  const [route, setRoute] = useState(null)
+  const [isLoadingRoute, setIsLoadingRoute] = useState(false)
+  const [routeError, setRouteError] = useState('')
+
+  const path = route?.path ?? []
+  const canTrack = path.length > 1
   const hasArrived = path.length > 0 && pathIndex >= path.length - 1
+
+  // Loads a street route whenever the chosen points change
+  useEffect(() => {
+    if (markers.length < 2) {
+      setRoute(null)
+      setRouteError('')
+      return
+    }
+
+    let cancelled = false
+    setIsLoadingRoute(true)
+    setRouteError('')
+
+    fetchRoute(markers)
+      .then((result) => {
+        if (!cancelled) setRoute(result)
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setRoute(null)
+          setRouteError(err.message)
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingRoute(false)
+      })
+
+    // Ignore the response if the points changed again before it arrived
+    return () => {
+      cancelled = true
+    }
+  }, [markers])
 
   // Steps the vehicle along the path to simulate live position updates
   useEffect(() => {
@@ -200,10 +238,18 @@ export default function App() {
         <section className="panel">
           <h2>Live tracking</h2>
 
-          {!canTrack ? (
+          {markers.length < 2 ? (
             <p className="hint">Pick at least two points on the map to start a trip</p>
+          ) : isLoadingRoute ? (
+            <p className="hint">Finding a route along the streets…</p>
+          ) : routeError ? (
+            <p className="error">{routeError}</p>
           ) : (
             <>
+              <p className="route-info">
+                {formatKm(route.distance)} · about {formatMins(route.duration)} by car
+              </p>
+
               <button
                 className={isTracking ? 'btn btn-stop' : 'btn btn-start'}
                 onClick={() => (isTracking ? setIsTracking(false) : handleStart())}
