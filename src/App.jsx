@@ -1,20 +1,17 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { MapContainer, TileLayer, Marker, Popup, Polyline, useMapEvents, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { ROUTE } from './route'
 import './index.css'
 
 // Leaflet's default icons don't load correctly with Vite, so building custom ones
-const makeIcon = (color) =>
+const makeIcon = (color, label) =>
   new L.DivIcon({
     className: 'pin-icon',
-    html: `<div class="pin" style="background:${color}"></div>`,
-    iconSize: [18, 18],
-    iconAnchor: [9, 9],
+    html: `<div class="pin" style="background:${color}">${label}</div>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
   })
-
-const PIN_ICON = makeIcon('#DB4444')
 
 // SVG instead of an emoji so it looks the same on every browser
 const VEHICLE_ICON = new L.DivIcon({
@@ -30,7 +27,29 @@ const VEHICLE_ICON = new L.DivIcon({
 })
 
 const DAMASCUS = [33.5138, 36.2765]
-const UPDATE_MS = 700
+const STEPS_PER_LEG = 60 // How many positions to generate between two points
+const TICK_MS = 60
+
+// Builds the positions the vehicle passes through by interpolating between the points
+function buildPath(points) {
+  if (points.length < 2) return []
+
+  const path = []
+  for (let i = 0; i < points.length - 1; i++) {
+    const from = points[i]
+    const to = points[i + 1]
+
+    for (let step = 0; step < STEPS_PER_LEG; step++) {
+      const t = step / STEPS_PER_LEG
+      path.push([from.lat + (to.lat - from.lat) * t, from.lng + (to.lng - from.lng) * t])
+    }
+  }
+  // Make sure the vehicle lands exactly on the final point
+  const last = points[points.length - 1]
+  path.push([last.lat, last.lng])
+
+  return path
+}
 
 // Listens for map clicks and passes the coordinates up
 function ClickHandler({ onAdd }) {
@@ -57,31 +76,60 @@ export default function App() {
   const [markers, setMarkers] = useState([])
   const [flyTarget, setFlyTarget] = useState(null)
   const [isTracking, setIsTracking] = useState(false)
-  const [routeIndex, setRouteIndex] = useState(0)
+  const [pathIndex, setPathIndex] = useState(0)
   const intervalRef = useRef(null)
 
-  // Steps through the route points on a timer to simulate live position updates
+  const path = useMemo(() => buildPath(markers), [markers])
+  const canTrack = markers.length >= 2
+  const hasArrived = path.length > 0 && pathIndex >= path.length - 1
+
+  // Steps the vehicle along the path to simulate live position updates
   useEffect(() => {
-    if (!isTracking) return
+    if (!isTracking || path.length === 0) return
 
     intervalRef.current = setInterval(() => {
-      setRouteIndex((i) => (i + 1) % ROUTE.length)
-    }, UPDATE_MS)
+      setPathIndex((i) => {
+        if (i >= path.length - 1) {
+          setIsTracking(false)
+          return i
+        }
+        return i + 1
+      })
+    }, TICK_MS)
 
     // Clear the timer when tracking stops or the component unmounts
     return () => clearInterval(intervalRef.current)
-  }, [isTracking])
+  }, [isTracking, path])
 
-  const vehiclePos = ROUTE[routeIndex]
-  const travelled = ROUTE.slice(0, routeIndex + 1)
+  const vehiclePos = path[pathIndex]
+  const travelled = path.slice(0, pathIndex + 1)
+  const progress = path.length > 1 ? Math.round((pathIndex / (path.length - 1)) * 100) : 0
 
+  // Any change to the route means the trip starts over
   const addMarker = useCallback((point) => {
     setMarkers((prev) => [...prev, point])
+    setIsTracking(false)
+    setPathIndex(0)
   }, [])
 
   const removeMarker = (id) => {
     setMarkers((prev) => prev.filter((m) => m.id !== id))
+    setIsTracking(false)
+    setPathIndex(0)
   }
+
+  const clearAll = () => {
+    setMarkers([])
+    setIsTracking(false)
+    setPathIndex(0)
+  }
+
+  const handleStart = () => {
+    if (hasArrived) setPathIndex(0) // Restart if the last trip already finished
+    setIsTracking(true)
+  }
+
+  const labelFor = (i) => (i === 0 ? 'Start' : i === markers.length - 1 ? 'Destination' : `Stop ${i}`)
 
   // Reads the device position from the browser and drops a pin there
   const locateMe = () => {
@@ -108,43 +156,23 @@ export default function App() {
           <p className="tagline">Interactive maps and live vehicle tracking, built with React and Leaflet</p>
         </header>
 
-        {/* Tracking controls */}
+        {/* Route points the user picked */}
         <section className="panel">
-          <h2>Live tracking</h2>
-          <p className="hint">Simulates position updates coming in for a vehicle and draws its route as it moves</p>
-
-          <button
-            className={isTracking ? 'btn btn-stop' : 'btn btn-start'}
-            onClick={() => setIsTracking((v) => !v)}
-          >
-            {isTracking ? 'Stop tracking' : 'Start tracking'}
-          </button>
-
-          <div className="coords">
-            <span>Vehicle position</span>
-            <code>
-              {vehiclePos[0].toFixed(5)}, {vehiclePos[1].toFixed(5)}
-            </code>
-          </div>
-        </section>
-
-        {/* Pins the user dropped on the map */}
-        <section className="panel">
-          <h2>Saved locations</h2>
-          <p className="hint">Click anywhere on the map to drop a pin</p>
+          <h2>Route points</h2>
+          <p className="hint">Click the map to set a start and a destination, then run the trip</p>
 
           <button className="btn btn-ghost" onClick={locateMe}>
             Use my location
           </button>
 
           {markers.length === 0 ? (
-            <p className="empty">No locations yet</p>
+            <p className="empty">No points yet</p>
           ) : (
             <ul className="marker-list">
               {markers.map((m, i) => (
                 <li key={m.id}>
                   <button className="marker-go" onClick={() => setFlyTarget(m)}>
-                    <strong>Point {i + 1}</strong>
+                    <strong>{labelFor(i)}</strong>
                     <code>
                       {m.lat.toFixed(4)}, {m.lng.toFixed(4)}
                     </code>
@@ -152,7 +180,7 @@ export default function App() {
                   <button
                     className="marker-del"
                     onClick={() => removeMarker(m.id)}
-                    aria-label={`Remove point ${i + 1}`}
+                    aria-label={`Remove ${labelFor(i)}`}
                   >
                     ×
                   </button>
@@ -162,9 +190,40 @@ export default function App() {
           )}
 
           {markers.length > 0 && (
-            <button className="btn btn-ghost" onClick={() => setMarkers([])}>
+            <button className="btn btn-ghost" onClick={clearAll}>
               Clear all
             </button>
+          )}
+        </section>
+
+        {/* Tracking controls */}
+        <section className="panel">
+          <h2>Live tracking</h2>
+
+          {!canTrack ? (
+            <p className="hint">Pick at least two points on the map to start a trip</p>
+          ) : (
+            <>
+              <button
+                className={isTracking ? 'btn btn-stop' : 'btn btn-start'}
+                onClick={() => (isTracking ? setIsTracking(false) : handleStart())}
+              >
+                {isTracking ? 'Pause' : hasArrived ? 'Run again' : 'Start trip'}
+              </button>
+
+              <div className="progress">
+                <div className="progress-bar" style={{ width: `${progress}%` }} />
+              </div>
+
+              <div className="coords">
+                <span>{hasArrived ? 'Arrived' : `On the way — ${progress}%`}</span>
+                {vehiclePos && (
+                  <code>
+                    {vehiclePos[0].toFixed(5)}, {vehiclePos[1].toFixed(5)}
+                  </code>
+                )}
+              </div>
+            </>
           )}
         </section>
 
@@ -187,30 +246,41 @@ export default function App() {
           <ClickHandler onAdd={addMarker} />
           <FlyTo target={flyTarget} />
 
-          {/* User pins */}
+          {/* Green for the start, red for the destination, grey for stops in between */}
           {markers.map((m, i) => (
-            <Marker key={m.id} position={[m.lat, m.lng]} icon={PIN_ICON}>
+            <Marker
+              key={m.id}
+              position={[m.lat, m.lng]}
+              icon={makeIcon(i === 0 ? '#16A34A' : i === markers.length - 1 ? '#DB4444' : '#6B7280', i + 1)}
+            >
               <Popup>
-                <strong>Point {i + 1}</strong>
+                <strong>{labelFor(i)}</strong>
                 <br />
                 {m.lat.toFixed(5)}, {m.lng.toFixed(5)}
               </Popup>
             </Marker>
           ))}
 
-          {/* Path the vehicle already covered */}
+          {/* The planned route, dashed */}
+          {path.length > 1 && (
+            <Polyline positions={path} pathOptions={{ color: '#94A3B8', weight: 3, dashArray: '6 8' }} />
+          )}
+
+          {/* The part the vehicle already covered */}
           {travelled.length > 1 && (
-            <Polyline positions={travelled} pathOptions={{ color: '#2563EB', weight: 4 }} />
+            <Polyline positions={travelled} pathOptions={{ color: '#2563EB', weight: 5 }} />
           )}
 
           {/* The tracked vehicle */}
-          <Marker position={vehiclePos} icon={VEHICLE_ICON}>
-            <Popup>
-              Vehicle #1
-              <br />
-              {vehiclePos[0].toFixed(5)}, {vehiclePos[1].toFixed(5)}
-            </Popup>
-          </Marker>
+          {vehiclePos && (
+            <Marker position={vehiclePos} icon={VEHICLE_ICON}>
+              <Popup>
+                Vehicle #1
+                <br />
+                {vehiclePos[0].toFixed(5)}, {vehiclePos[1].toFixed(5)}
+              </Popup>
+            </Marker>
+          )}
         </MapContainer>
       </main>
     </div>
